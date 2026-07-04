@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import HTMLResponse
-from icalendar import Calendar, Event
+from icalendar import Calendar, Event, vRecur
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -29,6 +30,13 @@ WEBCAL_URLS = [url.strip() for url in os.getenv("WEBCAL_URLS", "").split(",") if
 app = FastAPI(title="Calendar Relay", version="0.1.0")
 
 
+class RecurrenceRule(BaseModel):
+    frequency: Literal["daily", "weekly", "monthly", "yearly"]
+    interval: int | None = Field(default=None, ge=1)
+    count: int | None = Field(default=None, ge=1)
+    until: date | datetime | None = None
+
+
 class EventCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     start: datetime
@@ -36,6 +44,10 @@ class EventCreate(BaseModel):
     timezone: str | None = Field(default=None, description="Used when start/end are naive datetimes.")
     description: str | None = None
     location: str | None = None
+    recurrence: str | RecurrenceRule | None = Field(
+        default=None,
+        description='iCalendar RRULE string such as "FREQ=WEEKLY;COUNT=6", or a recurrence object.',
+    )
     uid: str | None = None
 
     @field_validator("end")
@@ -55,6 +67,7 @@ class EventOut(BaseModel):
     status: str
     location: str | None = None
     description: str | None = None
+    recurrence: str | None = None
 
 
 class WebcalUrlsUpdate(BaseModel):
@@ -100,12 +113,16 @@ def init_db() -> None:
                 end TEXT NOT NULL,
                 description TEXT,
                 location TEXT,
+                recurrence TEXT,
                 status TEXT NOT NULL DEFAULT 'CONFIRMED',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "recurrence" not in columns:
+            conn.execute("ALTER TABLE events ADD COLUMN recurrence TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feed_cache (
@@ -157,6 +174,62 @@ def normalize_feed_url(url: str) -> str:
     return urlunparse(parsed)
 
 
+def normalize_recurrence(recurrence: str | RecurrenceRule | None) -> str | None:
+    if recurrence is None:
+        return None
+    if isinstance(recurrence, RecurrenceRule):
+        parts = [f"FREQ={recurrence.frequency.upper()}"]
+        if recurrence.interval is not None:
+            parts.append(f"INTERVAL={recurrence.interval}")
+        if recurrence.count is not None:
+            parts.append(f"COUNT={recurrence.count}")
+        if recurrence.until is not None:
+            until = recurrence.until
+            if isinstance(until, datetime):
+                if until.tzinfo:
+                    parts.append(f"UNTIL={until.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}")
+                else:
+                    parts.append(f"UNTIL={until.strftime('%Y%m%dT%H%M%S')}")
+            else:
+                parts.append(f"UNTIL={until.strftime('%Y%m%d')}")
+        return validate_rrule(";".join(parts))
+    return validate_rrule(recurrence)
+
+
+def validate_rrule(value: str) -> str:
+    value = value.strip()
+    if value.upper().startswith("RRULE:"):
+        value = value.split(":", 1)[1].strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="recurrence must not be empty")
+    if "\n" in value or "\r" in value:
+        raise HTTPException(status_code=400, detail="recurrence must be a single RRULE line")
+
+    normalized_parts: list[str] = []
+    seen_keys: set[str] = set()
+    for part in value.split(";"):
+        if "=" not in part:
+            raise HTTPException(status_code=400, detail=f"invalid recurrence part: {part}")
+        key, raw_part_value = part.split("=", 1)
+        key = key.strip().upper()
+        part_value = raw_part_value.strip().upper()
+        if not re.fullmatch(r"[A-Z]+", key) or not part_value:
+            raise HTTPException(status_code=400, detail=f"invalid recurrence part: {part}")
+        if key in seen_keys:
+            raise HTTPException(status_code=400, detail=f"duplicate recurrence key: {key}")
+        seen_keys.add(key)
+        normalized_parts.append(f"{key}={part_value}")
+
+    if "FREQ" not in seen_keys:
+        raise HTTPException(status_code=400, detail="recurrence must include FREQ")
+    normalized = ";".join(normalized_parts)
+    try:
+        vRecur.from_ical(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid recurrence: {exc}") from exc
+    return normalized
+
+
 def get_webcal_urls() -> list[str]:
     with db() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = 'webcal_urls'").fetchone()
@@ -195,6 +268,7 @@ def row_to_event(row: sqlite3.Row) -> EventOut:
         status=row["status"],
         location=row["location"],
         description=row["description"],
+        recurrence=row["recurrence"],
     )
 
 
@@ -238,6 +312,8 @@ def build_local_event(row: sqlite3.Row) -> Event:
         event.add("description", row["description"])
     if row["location"]:
         event.add("location", row["location"])
+    if row["recurrence"]:
+        event.add("rrule", vRecur.from_ical(row["recurrence"]))
     return event
 
 
@@ -596,14 +672,19 @@ def admin():
         "  \\"timezone\\": \\"Europe/Berlin\\",",
         "  \\"description\\": \\"Optional notes\\",",
         "  \\"location\\": \\"Optional location\\",",
+        "  \\"recurrence\\": \\"FREQ=WEEKLY;COUNT=6\\",",
         "  \\"uid\\": \\"optional-stable-id@example-service\\"",
         "}",
+        "",
+        "Alternative recurrence object:",
+        "{ \\"frequency\\": \\"weekly\\", \\"interval\\": 1, \\"count\\": 6 }",
         "",
         "Rules:",
         "- start and end may be naive local datetimes when timezone is provided.",
         "- end must be after start.",
+        "- recurrence is optional. Use an iCalendar RRULE string, with or without RRULE:, or an object with frequency, interval, count, and until.",
         "- uid is optional; pass a stable uid if the source system has one.",
-        "- The response contains uid, title, start, end, status, location, and description.",
+        "- The response contains uid, title, start, end, status, location, description, and recurrence.",
         "",
         "List created events:",
         "GET /api/events",
@@ -705,12 +786,15 @@ def create_event(payload: EventCreate, _: Annotated[None, Depends(require_api_ke
     uid = payload.uid or f"{uuid4()}@calendar-relay"
     start = as_aware(payload.start, payload.timezone).astimezone(UTC)
     end = as_aware(payload.end, payload.timezone).astimezone(UTC)
+    recurrence = normalize_recurrence(payload.recurrence)
     with db() as conn:
         try:
             conn.execute(
                 """
-                INSERT INTO events (uid, title, start, end, description, location, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?)
+                INSERT INTO events (
+                    uid, title, start, end, description, location, recurrence, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?)
                 """,
                 (
                     uid,
@@ -719,6 +803,7 @@ def create_event(payload: EventCreate, _: Annotated[None, Depends(require_api_ke
                     end.isoformat(),
                     payload.description,
                     payload.location,
+                    recurrence,
                     now,
                     now,
                 ),

@@ -69,8 +69,20 @@ curl -X POST https://calendar-relay.misei.dev/api/events \
     "start": "2026-07-06T09:00:00",
     "end": "2026-07-06T09:30:00",
     "timezone": "Europe/Berlin",
-    "location": "Berlin"
+    "location": "Berlin",
+    "recurrence": "FREQ=WEEKLY;COUNT=6"
   }'
+```
+
+`recurrence` is optional. It accepts an iCalendar `RRULE` string, with or without
+the `RRULE:` prefix, or an object such as:
+
+```json
+{
+  "frequency": "weekly",
+  "interval": 1,
+  "count": 6
+}
 ```
 
 List upstream calendar URLs:
