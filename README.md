@@ -44,6 +44,14 @@ Set these in `compose.yml`:
 
 Send the API key with `X-API-Key` or `Authorization: Bearer`.
 
+A small browser UI is available at:
+
+```text
+https://calendar-relay.misei.dev/admin
+```
+
+It stores the API key in local browser storage and uses it to manage upstream webcal URLs and local events.
+
 Create an appointment:
 
 ```sh

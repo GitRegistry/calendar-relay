@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi.responses import HTMLResponse
 from icalendar import Calendar, Event
 from pydantic import BaseModel, Field, field_validator
 
@@ -65,7 +66,10 @@ class WebcalUrlsUpdate(BaseModel):
         normalized_urls: list[str] = []
         seen: set[str] = set()
         for url in urls:
-            normalized = normalize_feed_url(url.strip())
+            url = url.strip()
+            if not url:
+                continue
+            normalized = normalize_feed_url(url)
             if normalized in seen:
                 continue
             seen.add(normalized)
@@ -278,6 +282,341 @@ def root():
         "calendar_url": calendar_url,
         "webcal_url": calendar_url.replace("https://", "webcal://", 1),
     }
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin():
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calendar Relay</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8f5;
+      --panel: #ffffff;
+      --text: #20231f;
+      --muted: #666f61;
+      --border: #d9ded2;
+      --accent: #286b55;
+      --danger: #9d3328;
+      --surface: #eef1ea;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10130f;
+        --panel: #191d17;
+        --text: #edf1e8;
+        --muted: #aeb7a8;
+        --border: #353d31;
+        --accent: #74c7a5;
+        --danger: #f08a7d;
+        --surface: #23291f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main {
+      width: min(960px, calc(100vw - 32px));
+      margin: 32px auto;
+      display: grid;
+      gap: 18px;
+    }
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1, h2 { margin: 0; line-height: 1.15; }
+    h1 { font-size: clamp(28px, 5vw, 44px); }
+    h2 { font-size: 18px; }
+    a { color: var(--accent); }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    input, textarea {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 10px;
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+    }
+    textarea {
+      min-height: 130px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    button {
+      min-height: 40px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 14px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    button.danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid color-mix(in srgb, var(--danger), transparent 45%);
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .status {
+      min-height: 22px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .events {
+      display: grid;
+      gap: 8px;
+    }
+    .event {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      background: var(--surface);
+    }
+    .event strong, .event span { overflow-wrap: anywhere; }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 720px) {
+      main { width: min(100vw - 20px, 960px); margin: 16px auto; }
+      section { padding: 14px; }
+      .grid { grid-template-columns: 1fr; }
+      .event { grid-template-columns: 1fr; }
+      .event .row { justify-content: stretch; }
+      .event button { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Calendar Relay</h1>
+        <div class="meta"><a href="/calendar.ics">calendar.ics</a></div>
+      </div>
+      <button class="secondary" id="reload" type="button">Refresh</button>
+    </header>
+
+    <section>
+      <h2>Access</h2>
+      <label>API key
+        <input id="apiKey" type="password" autocomplete="off">
+      </label>
+      <div class="row">
+        <button id="saveKey" type="button">Save key</button>
+        <button class="secondary" id="clearKey" type="button">Clear</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Webcal Sources</h2>
+      <label>One URL per line
+        <textarea id="webcalUrls" spellcheck="false"></textarea>
+      </label>
+      <div class="row">
+        <button id="saveWebcals" type="button">Save sources</button>
+      </div>
+      <div class="status" id="webcalStatus"></div>
+    </section>
+
+    <section>
+      <h2>Add Event</h2>
+      <div class="grid">
+        <label>Title <input id="eventTitle" required></label>
+        <label>Timezone <input id="eventTimezone" value="Europe/Berlin"></label>
+        <label>Start <input id="eventStart" type="datetime-local"></label>
+        <label>End <input id="eventEnd" type="datetime-local"></label>
+        <label>Location <input id="eventLocation"></label>
+        <label>Description <input id="eventDescription"></label>
+      </div>
+      <div class="row">
+        <button id="createEvent" type="button">Create event</button>
+      </div>
+      <div class="status" id="eventStatus"></div>
+    </section>
+
+    <section>
+      <h2>Events</h2>
+      <div class="events" id="events"></div>
+    </section>
+  </main>
+
+  <script>
+    const keyInput = document.querySelector("#apiKey");
+    const urlsInput = document.querySelector("#webcalUrls");
+    const eventsEl = document.querySelector("#events");
+    const webcalStatus = document.querySelector("#webcalStatus");
+    const eventStatus = document.querySelector("#eventStatus");
+
+    keyInput.value = localStorage.getItem("calendarRelayApiKey") || "";
+
+    function headers() {
+      const key = keyInput.value.trim();
+      return key ? { "X-API-Key": key } : {};
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          ...headers(),
+          ...(options.body ? { "Content-Type": "application/json" } : {}),
+          ...(options.headers || {})
+        }
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || response.statusText);
+      }
+      if (response.status === 204) return null;
+      return response.json();
+    }
+
+    function formatDate(value) {
+      return new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short"
+      }).format(new Date(value));
+    }
+
+    async function loadWebcals() {
+      const data = await api("/api/webcal-urls");
+      urlsInput.value = data.urls.join("\\n");
+      webcalStatus.textContent = `${data.urls.length} source${data.urls.length === 1 ? "" : "s"}`;
+    }
+
+    async function loadEvents() {
+      const events = await api("/api/events");
+      eventsEl.innerHTML = "";
+      if (!events.length) {
+        eventsEl.innerHTML = '<div class="meta">No local events.</div>';
+        return;
+      }
+      for (const event of events) {
+        const item = document.createElement("div");
+        item.className = "event";
+        item.innerHTML = `
+          <div>
+            <strong></strong>
+            <div class="meta"></div>
+          </div>
+          <div class="row">
+            <button class="secondary" type="button" data-action="cancel">Cancel</button>
+            <button class="danger" type="button" data-action="delete">Delete</button>
+          </div>
+        `;
+        item.querySelector("strong").textContent = event.title;
+        item.querySelector(".meta").textContent = `${formatDate(event.start)} - ${formatDate(event.end)} · ${event.status}`;
+        item.querySelector('[data-action="cancel"]').onclick = async () => {
+          await api(`/api/events/${encodeURIComponent(event.uid)}/cancel`, { method: "POST" });
+          await loadEvents();
+        };
+        item.querySelector('[data-action="delete"]').onclick = async () => {
+          await api(`/api/events/${encodeURIComponent(event.uid)}`, { method: "DELETE" });
+          await loadEvents();
+        };
+        eventsEl.appendChild(item);
+      }
+    }
+
+    async function refreshAll() {
+      try {
+        await Promise.all([loadWebcals(), loadEvents()]);
+      } catch (error) {
+        webcalStatus.textContent = error.message;
+      }
+    }
+
+    document.querySelector("#saveKey").onclick = async () => {
+      localStorage.setItem("calendarRelayApiKey", keyInput.value.trim());
+      await refreshAll();
+    };
+    document.querySelector("#clearKey").onclick = () => {
+      localStorage.removeItem("calendarRelayApiKey");
+      keyInput.value = "";
+    };
+    document.querySelector("#reload").onclick = refreshAll;
+    document.querySelector("#saveWebcals").onclick = async () => {
+      const urls = urlsInput.value.split("\\n").map((url) => url.trim()).filter(Boolean);
+      const data = await api("/api/webcal-urls", {
+        method: "PUT",
+        body: JSON.stringify({ urls })
+      });
+      urlsInput.value = data.urls.join("\\n");
+      webcalStatus.textContent = "Saved";
+    };
+    document.querySelector("#createEvent").onclick = async () => {
+      const payload = {
+        title: document.querySelector("#eventTitle").value,
+        start: document.querySelector("#eventStart").value,
+        end: document.querySelector("#eventEnd").value,
+        timezone: document.querySelector("#eventTimezone").value || null,
+        location: document.querySelector("#eventLocation").value || null,
+        description: document.querySelector("#eventDescription").value || null
+      };
+      await api("/api/events", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      eventStatus.textContent = "Created";
+      await loadEvents();
+    };
+
+    if (keyInput.value) refreshAll();
+  </script>
+</body>
+</html>
+"""
 
 
 @app.get("/health")
