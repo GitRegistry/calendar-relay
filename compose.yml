@@ -12,13 +12,13 @@ services:
       API_KEY: "{&calendar_relay_api_key?}"
       CALENDAR_NAME: "Calendar Relay"
       DATA_DIR: /data
-      PUBLIC_BASE_URL: "https://calendar-relay.misei.dev"
+      PUBLIC_BASE_URL: "https://calendar.misei.dev"
       WEBCAL_URLS: ""
       CACHE_TTL_SECONDS: "900"
     volumes:
       - /vol/calendar-relay/data:/data
     labels:
-      caddy: calendar-relay.misei.dev
+      caddy: calendar.misei.dev
       caddy.reverse_proxy: "{{upstreams 8080}}"
 
 networks:
