@@ -301,7 +301,6 @@ def admin():
       --muted: #666f61;
       --border: #d9ded2;
       --accent: #286b55;
-      --danger: #9d3328;
       --surface: #eef1ea;
     }
     @media (prefers-color-scheme: dark) {
@@ -312,7 +311,6 @@ def admin():
         --muted: #aeb7a8;
         --border: #353d31;
         --accent: #74c7a5;
-        --danger: #f08a7d;
         --surface: #23291f;
       }
     }
@@ -387,53 +385,38 @@ def admin():
       color: var(--text);
       border: 1px solid var(--border);
     }
-    button.danger {
-      background: transparent;
-      color: var(--danger);
-      border: 1px solid color-mix(in srgb, var(--danger), transparent 45%);
-    }
     .row {
       display: flex;
       gap: 10px;
       align-items: center;
       flex-wrap: wrap;
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
     .status {
       min-height: 22px;
       color: var(--muted);
       font-size: 13px;
     }
-    .events {
-      display: grid;
-      gap: 8px;
-    }
-    .event {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 10px;
-      align-items: center;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px;
-      background: var(--surface);
-    }
-    .event strong, .event span { overflow-wrap: anywhere; }
     .meta {
       color: var(--muted);
       font-size: 13px;
     }
+    .hidden { display: none; }
+    pre {
+      margin: 0;
+      max-height: min(58vh, 620px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      background: var(--surface);
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     @media (max-width: 720px) {
       main { width: min(100vw - 20px, 960px); margin: 16px auto; }
       section { padding: 14px; }
-      .grid { grid-template-columns: 1fr; }
-      .event { grid-template-columns: 1fr; }
-      .event .row { justify-content: stretch; }
-      .event button { flex: 1; }
+      button { width: 100%; }
     }
   </style>
 </head>
@@ -444,21 +427,21 @@ def admin():
         <h1>Calendar Relay</h1>
         <div class="meta"><a href="/calendar.ics">calendar.ics</a></div>
       </div>
-      <button class="secondary" id="reload" type="button">Refresh</button>
+      <button class="secondary hidden" id="changeKey" type="button">Change key</button>
     </header>
 
-    <section>
-      <h2>Access</h2>
+    <section id="loginPanel">
+      <h2>Login</h2>
       <label>API key
         <input id="apiKey" type="password" autocomplete="off">
       </label>
       <div class="row">
-        <button id="saveKey" type="button">Save key</button>
-        <button class="secondary" id="clearKey" type="button">Clear</button>
+        <button id="login" type="button">Continue</button>
       </div>
+      <div class="status" id="loginStatus"></div>
     </section>
 
-    <section>
+    <section id="sourcesPanel" class="hidden">
       <h2>Webcal Sources</h2>
       <label>One URL per line
         <textarea id="webcalUrls" spellcheck="false"></textarea>
@@ -469,40 +452,41 @@ def admin():
       <div class="status" id="webcalStatus"></div>
     </section>
 
-    <section>
-      <h2>Add Event</h2>
-      <div class="grid">
-        <label>Title <input id="eventTitle" required></label>
-        <label>Timezone <input id="eventTimezone" value="Europe/Berlin"></label>
-        <label>Start <input id="eventStart" type="datetime-local"></label>
-        <label>End <input id="eventEnd" type="datetime-local"></label>
-        <label>Location <input id="eventLocation"></label>
-        <label>Description <input id="eventDescription"></label>
-      </div>
+    <section id="schemaPanel" class="hidden">
+      <h2>OpenAPI Schema</h2>
       <div class="row">
-        <button id="createEvent" type="button">Create event</button>
+        <button id="copySchema" type="button">Copy schema</button>
+        <button class="secondary" id="refresh" type="button">Refresh</button>
       </div>
-      <div class="status" id="eventStatus"></div>
-    </section>
-
-    <section>
-      <h2>Events</h2>
-      <div class="events" id="events"></div>
+      <pre id="openapiSchema"></pre>
+      <div class="status" id="schemaStatus"></div>
     </section>
   </main>
 
   <script>
     const keyInput = document.querySelector("#apiKey");
+    const loginPanel = document.querySelector("#loginPanel");
+    const sourcesPanel = document.querySelector("#sourcesPanel");
+    const schemaPanel = document.querySelector("#schemaPanel");
+    const changeKeyButton = document.querySelector("#changeKey");
     const urlsInput = document.querySelector("#webcalUrls");
-    const eventsEl = document.querySelector("#events");
+    const loginStatus = document.querySelector("#loginStatus");
     const webcalStatus = document.querySelector("#webcalStatus");
-    const eventStatus = document.querySelector("#eventStatus");
+    const schemaStatus = document.querySelector("#schemaStatus");
+    const schemaOutput = document.querySelector("#openapiSchema");
 
     keyInput.value = localStorage.getItem("calendarRelayApiKey") || "";
 
     function headers() {
       const key = keyInput.value.trim();
       return key ? { "X-API-Key": key } : {};
+    }
+
+    function setLoggedIn(loggedIn) {
+      loginPanel.classList.toggle("hidden", loggedIn);
+      sourcesPanel.classList.toggle("hidden", !loggedIn);
+      schemaPanel.classList.toggle("hidden", !loggedIn);
+      changeKeyButton.classList.toggle("hidden", !loggedIn);
     }
 
     async function api(path, options = {}) {
@@ -522,70 +506,41 @@ def admin():
       return response.json();
     }
 
-    function formatDate(value) {
-      return new Intl.DateTimeFormat(undefined, {
-        dateStyle: "medium",
-        timeStyle: "short"
-      }).format(new Date(value));
-    }
-
     async function loadWebcals() {
       const data = await api("/api/webcal-urls");
       urlsInput.value = data.urls.join("\\n");
       webcalStatus.textContent = `${data.urls.length} source${data.urls.length === 1 ? "" : "s"}`;
     }
 
-    async function loadEvents() {
-      const events = await api("/api/events");
-      eventsEl.innerHTML = "";
-      if (!events.length) {
-        eventsEl.innerHTML = '<div class="meta">No local events.</div>';
-        return;
-      }
-      for (const event of events) {
-        const item = document.createElement("div");
-        item.className = "event";
-        item.innerHTML = `
-          <div>
-            <strong></strong>
-            <div class="meta"></div>
-          </div>
-          <div class="row">
-            <button class="secondary" type="button" data-action="cancel">Cancel</button>
-            <button class="danger" type="button" data-action="delete">Delete</button>
-          </div>
-        `;
-        item.querySelector("strong").textContent = event.title;
-        item.querySelector(".meta").textContent = `${formatDate(event.start)} - ${formatDate(event.end)} · ${event.status}`;
-        item.querySelector('[data-action="cancel"]').onclick = async () => {
-          await api(`/api/events/${encodeURIComponent(event.uid)}/cancel`, { method: "POST" });
-          await loadEvents();
-        };
-        item.querySelector('[data-action="delete"]').onclick = async () => {
-          await api(`/api/events/${encodeURIComponent(event.uid)}`, { method: "DELETE" });
-          await loadEvents();
-        };
-        eventsEl.appendChild(item);
-      }
+    async function loadSchema() {
+      const response = await fetch("/openapi.json");
+      if (!response.ok) throw new Error(await response.text() || response.statusText);
+      const schema = await response.json();
+      schemaOutput.textContent = JSON.stringify(schema, null, 2);
+      schemaStatus.textContent = "Loaded";
     }
 
     async function refreshAll() {
       try {
-        await Promise.all([loadWebcals(), loadEvents()]);
+        await Promise.all([loadWebcals(), loadSchema()]);
+        setLoggedIn(true);
+        loginStatus.textContent = "";
       } catch (error) {
-        webcalStatus.textContent = error.message;
+        setLoggedIn(false);
+        loginStatus.textContent = error.message;
       }
     }
 
-    document.querySelector("#saveKey").onclick = async () => {
+    document.querySelector("#login").onclick = async () => {
       localStorage.setItem("calendarRelayApiKey", keyInput.value.trim());
       await refreshAll();
     };
-    document.querySelector("#clearKey").onclick = () => {
+    changeKeyButton.onclick = () => {
       localStorage.removeItem("calendarRelayApiKey");
       keyInput.value = "";
+      setLoggedIn(false);
     };
-    document.querySelector("#reload").onclick = refreshAll;
+    document.querySelector("#refresh").onclick = refreshAll;
     document.querySelector("#saveWebcals").onclick = async () => {
       const urls = urlsInput.value.split("\\n").map((url) => url.trim()).filter(Boolean);
       const data = await api("/api/webcal-urls", {
@@ -595,21 +550,9 @@ def admin():
       urlsInput.value = data.urls.join("\\n");
       webcalStatus.textContent = "Saved";
     };
-    document.querySelector("#createEvent").onclick = async () => {
-      const payload = {
-        title: document.querySelector("#eventTitle").value,
-        start: document.querySelector("#eventStart").value,
-        end: document.querySelector("#eventEnd").value,
-        timezone: document.querySelector("#eventTimezone").value || null,
-        location: document.querySelector("#eventLocation").value || null,
-        description: document.querySelector("#eventDescription").value || null
-      };
-      await api("/api/events", {
-        method: "POST",
-        body: JSON.stringify(payload)
-      });
-      eventStatus.textContent = "Created";
-      await loadEvents();
+    document.querySelector("#copySchema").onclick = async () => {
+      await navigator.clipboard.writeText(schemaOutput.textContent);
+      schemaStatus.textContent = "Copied";
     };
 
     if (keyInput.value) refreshAll();

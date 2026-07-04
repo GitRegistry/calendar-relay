@@ -50,7 +50,7 @@ A small browser UI is available at:
 https://calendar-relay.misei.dev/admin
 ```
 
-It stores the API key in local browser storage and uses it to manage upstream webcal URLs and local events.
+It asks for the API key, then shows upstream webcal URL editing and the full OpenAPI schema for copy/paste.
 
 Create an appointment:
 
