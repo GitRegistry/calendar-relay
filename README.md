@@ -5,10 +5,16 @@ Calendar Relay publishes one subscription calendar from two sources:
 - upstream `webcal://` or `https://` iCalendar feeds, managed through the HTTP API
 - appointments created by producers through the small HTTP API
 
-Apple Calendar can subscribe to:
+Apple Calendar can subscribe to the combined calendar:
 
 ```text
 webcal://calendar-relay.misei.dev/calendar.ics
+```
+
+Or only the events created through this API:
+
+```text
+webcal://calendar-relay.misei.dev/created.ics
 ```
 
 ## Deploy
@@ -50,7 +56,7 @@ A small browser UI is available at:
 https://calendar-relay.misei.dev/admin
 ```
 
-It asks for the API key, then shows upstream webcal URL editing and the full OpenAPI schema for copy/paste.
+It asks for the API key, then shows subscription links, upstream webcal URL editing, and copyable implementation instructions for another agent/service.
 
 Create an appointment:
 

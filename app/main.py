@@ -241,7 +241,7 @@ def build_local_event(row: sqlite3.Row) -> Event:
     return event
 
 
-async def build_calendar() -> bytes:
+async def build_calendar(include_sources: bool = True) -> bytes:
     calendar = Calendar()
     calendar.add("prodid", "-//calendar-relay//calendar-relay 0.1//EN")
     calendar.add("version", "2.0")
@@ -256,20 +256,21 @@ async def build_calendar() -> bytes:
         seen_uids.add(row["uid"])
         calendar.add_component(build_local_event(row))
 
-    for source_url in get_webcal_urls():
-        body = await fetch_feed(source_url)
-        if not body:
-            continue
-        source = Calendar.from_ical(body)
-        for component in source.walk("VEVENT"):
-            uid = str(component.get("uid", ""))
-            if not uid:
-                uid = hashlib.sha256(component.to_ical()).hexdigest()
-                component.add("uid", uid)
-            if uid in seen_uids:
+    if include_sources:
+        for source_url in get_webcal_urls():
+            body = await fetch_feed(source_url)
+            if not body:
                 continue
-            seen_uids.add(uid)
-            calendar.add_component(component)
+            source = Calendar.from_ical(body)
+            for component in source.walk("VEVENT"):
+                uid = str(component.get("uid", ""))
+                if not uid:
+                    uid = hashlib.sha256(component.to_ical()).hexdigest()
+                    component.add("uid", uid)
+                if uid in seen_uids:
+                    continue
+                seen_uids.add(uid)
+                calendar.add_component(component)
 
     return calendar.to_ical()
 
@@ -277,10 +278,13 @@ async def build_calendar() -> bytes:
 @app.get("/")
 def root():
     calendar_url = f"{PUBLIC_BASE_URL}/calendar.ics" if PUBLIC_BASE_URL else "/calendar.ics"
+    created_calendar_url = f"{PUBLIC_BASE_URL}/created.ics" if PUBLIC_BASE_URL else "/created.ics"
     return {
         "service": "calendar-relay",
         "calendar_url": calendar_url,
         "webcal_url": calendar_url.replace("https://", "webcal://", 1),
+        "created_calendar_url": created_calendar_url,
+        "created_webcal_url": created_calendar_url.replace("https://", "webcal://", 1),
     }
 
 
@@ -400,6 +404,25 @@ def admin():
       color: var(--muted);
       font-size: 13px;
     }
+    .links {
+      display: grid;
+      gap: 10px;
+    }
+    .link-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      background: var(--surface);
+    }
+    .link-item a {
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
     .hidden { display: none; }
     pre {
       margin: 0;
@@ -417,6 +440,7 @@ def admin():
       main { width: min(100vw - 20px, 960px); margin: 16px auto; }
       section { padding: 14px; }
       button { width: 100%; }
+      .link-item { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -425,7 +449,7 @@ def admin():
     <header>
       <div>
         <h1>Calendar Relay</h1>
-        <div class="meta"><a href="/calendar.ics">calendar.ics</a></div>
+        <div class="meta">Subscription calendars</div>
       </div>
       <button class="secondary hidden" id="changeKey" type="button">Change key</button>
     </header>
@@ -441,6 +465,29 @@ def admin():
       <div class="status" id="loginStatus"></div>
     </section>
 
+    <section id="linksPanel" class="hidden">
+      <h2>Calendar Links</h2>
+      <div class="links">
+        <div class="link-item">
+          <div>
+            <strong>All calendars</strong>
+            <div class="meta">Created events plus webcal sources</div>
+            <a id="allCalendarLink" href="/calendar.ics">/calendar.ics</a>
+          </div>
+          <button class="secondary" id="copyAllCalendar" type="button">Copy</button>
+        </div>
+        <div class="link-item">
+          <div>
+            <strong>Created events only</strong>
+            <div class="meta">Only events created through the API</div>
+            <a id="createdCalendarLink" href="/created.ics">/created.ics</a>
+          </div>
+          <button class="secondary" id="copyCreatedCalendar" type="button">Copy</button>
+        </div>
+      </div>
+      <div class="status" id="linksStatus"></div>
+    </section>
+
     <section id="sourcesPanel" class="hidden">
       <h2>Webcal Sources</h2>
       <label>One URL per line
@@ -452,28 +499,32 @@ def admin():
       <div class="status" id="webcalStatus"></div>
     </section>
 
-    <section id="schemaPanel" class="hidden">
-      <h2>OpenAPI Schema</h2>
+    <section id="instructionsPanel" class="hidden">
+      <h2>Agent Instructions</h2>
       <div class="row">
-        <button id="copySchema" type="button">Copy schema</button>
+        <button id="copyInstructions" type="button">Copy instructions</button>
         <button class="secondary" id="refresh" type="button">Refresh</button>
       </div>
-      <pre id="openapiSchema"></pre>
-      <div class="status" id="schemaStatus"></div>
+      <pre id="agentInstructions"></pre>
+      <div class="status" id="instructionsStatus"></div>
     </section>
   </main>
 
   <script>
     const keyInput = document.querySelector("#apiKey");
     const loginPanel = document.querySelector("#loginPanel");
+    const linksPanel = document.querySelector("#linksPanel");
     const sourcesPanel = document.querySelector("#sourcesPanel");
-    const schemaPanel = document.querySelector("#schemaPanel");
+    const instructionsPanel = document.querySelector("#instructionsPanel");
     const changeKeyButton = document.querySelector("#changeKey");
     const urlsInput = document.querySelector("#webcalUrls");
     const loginStatus = document.querySelector("#loginStatus");
+    const linksStatus = document.querySelector("#linksStatus");
     const webcalStatus = document.querySelector("#webcalStatus");
-    const schemaStatus = document.querySelector("#schemaStatus");
-    const schemaOutput = document.querySelector("#openapiSchema");
+    const instructionsStatus = document.querySelector("#instructionsStatus");
+    const instructionsOutput = document.querySelector("#agentInstructions");
+    const allCalendarLink = document.querySelector("#allCalendarLink");
+    const createdCalendarLink = document.querySelector("#createdCalendarLink");
 
     keyInput.value = localStorage.getItem("calendarRelayApiKey") || "";
 
@@ -484,9 +535,18 @@ def admin():
 
     function setLoggedIn(loggedIn) {
       loginPanel.classList.toggle("hidden", loggedIn);
+      linksPanel.classList.toggle("hidden", !loggedIn);
       sourcesPanel.classList.toggle("hidden", !loggedIn);
-      schemaPanel.classList.toggle("hidden", !loggedIn);
+      instructionsPanel.classList.toggle("hidden", !loggedIn);
       changeKeyButton.classList.toggle("hidden", !loggedIn);
+    }
+
+    function absoluteUrl(path) {
+      return new URL(path, window.location.origin).toString();
+    }
+
+    function webcalUrl(path) {
+      return absoluteUrl(path).replace(/^https:/, "webcal:");
     }
 
     async function api(path, options = {}) {
@@ -512,17 +572,64 @@ def admin():
       webcalStatus.textContent = `${data.urls.length} source${data.urls.length === 1 ? "" : "s"}`;
     }
 
-    async function loadSchema() {
-      const response = await fetch("/openapi.json");
-      if (!response.ok) throw new Error(await response.text() || response.statusText);
-      const schema = await response.json();
-      schemaOutput.textContent = JSON.stringify(schema, null, 2);
-      schemaStatus.textContent = "Loaded";
+    function loadLinks() {
+      allCalendarLink.href = webcalUrl("/calendar.ics");
+      allCalendarLink.textContent = webcalUrl("/calendar.ics");
+      createdCalendarLink.href = webcalUrl("/created.ics");
+      createdCalendarLink.textContent = webcalUrl("/created.ics");
+    }
+
+    function loadInstructions() {
+      instructionsOutput.textContent = [
+        "Use Calendar Relay to create and manage appointments from another service.",
+        "",
+        "Base URL: " + window.location.origin,
+        "Authentication: send the API key as X-API-Key: <key> or Authorization: Bearer <key>.",
+        "",
+        "Create an event:",
+        "POST /api/events",
+        "Content-Type: application/json",
+        "{",
+        "  \\"title\\": \\"Appointment title\\",",
+        "  \\"start\\": \\"2026-07-06T09:00:00\\",",
+        "  \\"end\\": \\"2026-07-06T09:30:00\\",",
+        "  \\"timezone\\": \\"Europe/Berlin\\",",
+        "  \\"description\\": \\"Optional notes\\",",
+        "  \\"location\\": \\"Optional location\\",",
+        "  \\"uid\\": \\"optional-stable-id@example-service\\"",
+        "}",
+        "",
+        "Rules:",
+        "- start and end may be naive local datetimes when timezone is provided.",
+        "- end must be after start.",
+        "- uid is optional; pass a stable uid if the source system has one.",
+        "- The response contains uid, title, start, end, status, location, and description.",
+        "",
+        "List created events:",
+        "GET /api/events",
+        "",
+        "Cancel an event but keep a CANCELLED entry in the feed:",
+        "POST /api/events/{uid}/cancel",
+        "",
+        "Delete an event from the feed:",
+        "DELETE /api/events/{uid}",
+        "",
+        "Calendar subscriptions:",
+        "- All calendars, including webcal sources: " + webcalUrl("/calendar.ics"),
+        "- Created events only: " + webcalUrl("/created.ics"),
+        "",
+        "Webcal source management:",
+        "GET /api/webcal-urls",
+        "PUT /api/webcal-urls with { \\"urls\\": [\\"webcal://example.com/team.ics\\"] }",
+      ].join("\\n");
+      instructionsStatus.textContent = "Ready";
     }
 
     async function refreshAll() {
       try {
-        await Promise.all([loadWebcals(), loadSchema()]);
+        loadLinks();
+        loadInstructions();
+        await loadWebcals();
         setLoggedIn(true);
         loginStatus.textContent = "";
       } catch (error) {
@@ -550,9 +657,17 @@ def admin():
       urlsInput.value = data.urls.join("\\n");
       webcalStatus.textContent = "Saved";
     };
-    document.querySelector("#copySchema").onclick = async () => {
-      await navigator.clipboard.writeText(schemaOutput.textContent);
-      schemaStatus.textContent = "Copied";
+    document.querySelector("#copyAllCalendar").onclick = async () => {
+      await navigator.clipboard.writeText(allCalendarLink.textContent);
+      linksStatus.textContent = "Copied all calendars link";
+    };
+    document.querySelector("#copyCreatedCalendar").onclick = async () => {
+      await navigator.clipboard.writeText(createdCalendarLink.textContent);
+      linksStatus.textContent = "Copied created events link";
+    };
+    document.querySelector("#copyInstructions").onclick = async () => {
+      await navigator.clipboard.writeText(instructionsOutput.textContent);
+      instructionsStatus.textContent = "Copied";
     };
 
     if (keyInput.value) refreshAll();
@@ -638,7 +753,16 @@ def delete_event(uid: str, _: Annotated[None, Depends(require_api_key)]):
 @app.get("/calendar.ics")
 async def calendar_feed():
     return Response(
-        content=await build_calendar(),
+        content=await build_calendar(include_sources=True),
         media_type="text/calendar; charset=utf-8",
         headers={"Content-Disposition": 'inline; filename="calendar-relay.ics"'},
+    )
+
+
+@app.get("/created.ics")
+async def created_calendar_feed():
+    return Response(
+        content=await build_calendar(include_sources=False),
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": 'inline; filename="calendar-relay-created.ics"'},
     )
